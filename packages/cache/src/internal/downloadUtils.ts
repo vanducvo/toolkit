@@ -1,16 +1,18 @@
 import * as core from '@actions/core'
-import {HttpClient, HttpClientResponse} from '@actions/http-client'
-import {BlockBlobClient} from '@azure/storage-blob'
-import {TransferProgressEvent} from '@azure/ms-rest-js'
+import { HttpClient, HttpClientResponse } from '@actions/http-client'
+import { BlockBlobClient } from '@azure/storage-blob'
+import * as AWS from "aws-sdk";
+import { TransferProgressEvent } from '@azure/ms-rest-js'
 import * as buffer from 'buffer'
 import * as fs from 'fs'
 import * as stream from 'stream'
 import * as util from 'util'
 
 import * as utils from './cacheUtils'
-import {SocketTimeout} from './constants'
-import {DownloadOptions} from '../options'
-import {retryHttpClientResponse} from './requestUtils'
+import { SocketTimeout } from './constants'
+import { DownloadOptions } from '../options'
+import { retryHttpClientResponse } from './requestUtils'
+import { Credentials } from 'aws-sdk';
 
 /**
  * Pipes the body of a HTTP response to a stream
@@ -274,5 +276,62 @@ export async function downloadCacheStorageSDK(
       downloadProgress.stopDisplayTimer()
       fs.closeSync(fd)
     }
+  }
+}
+
+export async function downloadCacheS3SDK(
+  archiveLocation: string,
+  archivePath: string,
+  options: DownloadOptions
+): Promise<void> {
+  if (!options.s3AccessKey || 
+    !options.s3SecretKey ||
+    !options.s3Bucket || 
+    !archiveLocation) {
+    return
+  }
+
+  const credential = new Credentials({
+    accessKeyId: options.s3AccessKey,
+    secretAccessKey: options.s3SecretKey
+  })
+
+  const client = new AWS.S3({
+    endpoint: options.s3EndPoint,
+    region: options.s3Region,
+    credentials: credential,
+    maxRetries: 1,
+    httpOptions: { timeout: options.timeoutInMs }
+  })
+
+  const request = {
+    Bucket: options.s3Bucket,
+    Key: archiveLocation
+  }
+
+  const metadata = await client.headObject(request).promise()
+
+  const contentLength = metadata.ContentLength
+
+  if (!contentLength) {
+    return;
+  }
+
+  const downloadProgress = new DownloadProgress(contentLength)
+
+  const out = fs.createWriteStream(archivePath)
+
+  try {
+    downloadProgress.startDisplayTimer()
+
+    var object = client.getObject(request)
+      .createReadStream()
+      .pipe(out)
+
+    object.on('data', chunk => {
+      downloadProgress.nextSegment(chunk.size)
+    })
+  } finally {
+    out.close()
   }
 }

@@ -44,6 +44,7 @@
     "@actions/io": "^1.0.1",
     "@azure/ms-rest-js": "^2.6.0",
     "@azure/storage-blob": "^12.8.0",
+    "aws-sdk": "^2.1185.0",
     "semver": "^6.1.0",
     "uuid": "^3.3.3"
   },

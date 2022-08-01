@@ -1,16 +1,18 @@
 import * as core from '@actions/core'
-import {HttpClient} from '@actions/http-client'
-import {BearerCredentialHandler} from '@actions/http-client/lib/auth'
+import { HttpClient } from '@actions/http-client'
+import { BearerCredentialHandler } from '@actions/http-client/lib/auth'
 import {
   RequestOptions,
   TypedResponse
 } from '@actions/http-client/lib/interfaces'
 import * as crypto from 'crypto'
 import * as fs from 'fs'
-import {URL} from 'url'
+import * as AWS from "aws-sdk";
+import { Credentials } from 'aws-sdk';
+import { URL } from 'url'
 
 import * as utils from './cacheUtils'
-import {CompressionMethod} from './constants'
+import { CompressionMethod } from './constants'
 import {
   ArtifactCacheEntry,
   InternalCacheOptions,
@@ -19,7 +21,11 @@ import {
   ReserveCacheResponse,
   ITypedResponseWithError
 } from './contracts'
-import {downloadCacheHttpClient, downloadCacheStorageSDK} from './downloadUtils'
+import {
+  downloadCacheHttpClient,
+  downloadCacheS3SDK,
+  downloadCacheStorageSDK
+} from './downloadUtils'
 import {
   DownloadOptions,
   UploadOptions,
@@ -136,6 +142,8 @@ export async function downloadCache(
   ) {
     // Use Azure storage SDK to download caches hosted on Azure to improve speed and reliability.
     await downloadCacheStorageSDK(archiveLocation, archivePath, downloadOptions)
+  } else if (downloadOptions.useS3Sdk) {
+    await downloadCacheS3SDK(archiveLocation, archivePath, downloadOptions)
   } else {
     // Otherwise, download using the Actions http-client.
     await downloadCacheHttpClient(archiveLocation, archivePath)
@@ -183,8 +191,8 @@ async function uploadChunk(
 ): Promise<void> {
   core.debug(
     `Uploading chunk of size ${end -
-      start +
-      1} bytes at offset ${start} with content range: ${getContentRange(
+    start +
+    1} bytes at offset ${start} with content range: ${getContentRange(
       start,
       end
     )}`
@@ -274,12 +282,48 @@ async function uploadFile(
   return
 }
 
+async function uploadFileS3SDK(
+  cacheId: number,
+  archivePath: string,
+  options?: UploadOptions
+): Promise<void> {
+
+  const uploadOptions = getUploadOptions(options)
+
+  if (!uploadOptions.s3AccessKey ||
+    !uploadOptions.s3SecretKey ||
+    !uploadOptions.s3Bucket) {
+    return
+  }
+
+
+  const credential = new Credentials({
+    accessKeyId: uploadOptions.s3AccessKey,
+    secretAccessKey: uploadOptions.s3SecretKey
+  })
+
+  const client = new AWS.S3({
+    endpoint: uploadOptions.s3EndPoint,
+    region: uploadOptions.s3Region,
+    credentials: credential
+  })
+
+  const resourceUrl = getCacheApiUrl(`caches/${cacheId.toString()}`)
+  const input = fs.createReadStream(archivePath)
+  
+  await client.upload({
+    Bucket: uploadOptions.s3Bucket,
+    Key: resourceUrl,
+    Body: input
+  }).promise();
+}
+
 async function commitCache(
   httpClient: HttpClient,
   cacheId: number,
   filesize: number
 ): Promise<TypedResponse<null>> {
-  const commitCacheRequest: CommitCacheRequest = {size: filesize}
+  const commitCacheRequest: CommitCacheRequest = { size: filesize }
   return await retryTypedResponse('commitCache', async () =>
     httpClient.postJson<null>(
       getCacheApiUrl(`caches/${cacheId.toString()}`),
@@ -296,7 +340,12 @@ export async function saveCache(
   const httpClient = createHttpClient()
 
   core.debug('Upload cache')
-  await uploadFile(httpClient, cacheId, archivePath, options)
+  if (options?.useS3Sdk) {
+    await uploadFileS3SDK(cacheId, archivePath, options)
+  } else {
+    await uploadFile(httpClient, cacheId, archivePath, options)
+  }
+
 
   // Commit Cache
   core.debug('Commiting cache')
